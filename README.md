@@ -1,3 +1,5 @@
+<img width="1877" height="75" alt="Screenshot From 2026-04-18 13-37-49" src="https://github.com/user-attachments/assets/95c320e4-c84d-4716-ba96-3de7b1ca7ffb" />
+<img width="1877" height="99" alt="Screenshot From 2026-04-18 13-38-39" src="https://github.com/user-attachments/assets/4d34d1ae-86e9-4762-b945-e28a0fc5c049" />
 # Translating System Logs to Incident Reports 
 
 An automated ML pipeline built with TensorFlow and Keras that uses a custom Transformer model to translate raw, cryptic system logs into clear, actionable, and human-readable incident reports.
