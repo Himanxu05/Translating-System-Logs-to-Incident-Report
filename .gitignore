@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/loghub/
+.pytest_cache/
+.ruff_cache/
+*.keras
+outputs/
+data/*.jsonl

@@ -1,27 +1,163 @@
-<img width="1877" height="75" alt="Screenshot From 2026-04-18 13-37-49" src="https://github.com/user-attachments/assets/95c320e4-c84d-4716-ba96-3de7b1ca7ffb" />
-<img width="1877" height="99" alt="Screenshot From 2026-04-18 13-38-39" src="https://github.com/user-attachments/assets/4d34d1ae-86e9-4762-b945-e28a0fc5c049" />
-## Translating System Logs to Incident Reports 
+# Log → Incident Report
 
-An automated ML pipeline built with TensorFlow and Keras that uses a custom Transformer model to translate raw, cryptic system logs into clear, actionable, and human-readable incident reports.
+Give it a window of raw log lines from a server; get back a structured incident report:
 
-## Overview
+```
+ 1: Dec 10 10:54:54 LabSZ sshd[24898]: Failed password for root from 183.62.140.253 port 38375 ssh2
+ 2: Dec 10 10:54:54 LabSZ sshd[24898]: Received disconnect from 183.62.140.253: 11: Bye Bye [preauth]
+ 3: Dec 10 10:54:54 LabSZ sshd[24900]: pam_unix(sshd:auth): authentication failure; ... rhost=183.62.140.253 user=root
+ ...
+```
+```json
+{"status": "incident", "category": "authentication", "severity": "medium", "component": "sshd",
+ "evidence": [1, 3, 4, 6, 7, 9, 10, 12, 13, 15],
+ "summary": "10 authentication failures from sshd, e.g. \"Failed password for root from 183.62.140.253 ...\""}
+```
 
-System administrators and SREs often have to parse through dense server logs to figure out what caused an outage. This project demonstrates a Sequence-to-Sequence (Seq2Seq) approach using a Transformer architecture to read log patterns (like CPU saturation, Memory exhaustion, or Disk I/O bottlenecks) and generate natural language summaries.
+This is version 2. The main question it answers: **does a small LLM fine-tuned with QLoRA handle logs from
+systems it has never seen, where rules and my old model don't?**
 
-## Features
+## From v1 to v2
 
-* **Synthetic Dataset Generator:** Automatically generates training data containing realistic log sequences and their corresponding incident reports.
-* **Custom Transformer Architecture:** Implements a from-scratch Transformer model, including Positional Encoding and a Custom Multi-Head Attention layer.
-* **Robust Preprocessing:** Handles vocabulary tokenization, log normalization (masking IP addresses, timestamps, and numeric values), and sequence padding.
-* **Model Serialization:** Saves and loads custom Keras objects seamlessly for reuse without retraining.
+v1 (still in [`v1/`](v1/)) was a TensorFlow sequence-to-sequence model trained on synthetic logs. Looking back
+at it, it had real problems:
 
-## Prerequisites
+- **The README didn't match the code.** It described a from-scratch Transformer with positional encoding and
+  multi-head attention. The code is a BiLSTM encoder, an LSTM decoder and Keras' built-in attention layer.
+- **It made up details.** It masked every number in the input logs but had to produce reports containing the
+  real numbers and host names, so it guessed them.
+- **The task was too easy to mean anything.** The data came from 6 templates, and the test set used the same
+  templates, so the model only had to memorise them. The rule-based function in the same file already
+  covered all 6 cases.
+- **Evaluation:** a hand-written BLEU-1 on 5 samples.
 
-Make sure you have Python 3.x installed along with the following libraries:
+v2 fixes each of these:
 
-* `tensorflow` 
-* `numpy`
+| | v1 | v2 |
+|---|---|---|
+| data | 6 synthetic templates | 12 real systems from [Loghub](https://github.com/logpai/loghub) |
+| output | free text | JSON report with fields that can be checked exactly |
+| test set | same templates as training | includes 4 systems never seen in training |
+| model | BiLSTM seq2seq (TensorFlow) | Qwen2.5-1.5B-Instruct + QLoRA (PyTorch), compared against 4 baselines |
+| metric | BLEU-1 on 5 samples | per-field accuracy on 168 windows, plus "did it invent a component?" |
 
-You can install the required dependencies using:
+## The task
+
+Input: 15 consecutive raw log lines, numbered. Output: a JSON report.
+
+| field | values |
+|---|---|
+| `status` | `incident` / `normal` |
+| `category` | authentication, network, storage, hardware, service, permission, configuration, or none |
+| `severity` | medium, high, critical, or none |
+| `component` | the program that logged the problem, **copied exactly from the log** |
+| `evidence` | line numbers of the problem lines |
+| `summary` | one sentence |
+
+The prompt, including the category and severity definitions, is in [`src/logreport/prompt.py`](src/logreport/prompt.py).
+Every model gets the same one.
+
+## Data
+
+- **Source:** [Loghub](https://github.com/logpai/loghub)'s 2,000-line samples of 12 systems: Linux, OpenSSH,
+  Apache, HDFS, Hadoop, Spark, BGL, Zookeeper, OpenStack, Windows, Thunderbird and Proxifier. Loghub is free
+  for research and academic use; the logs aren't copied into this repo, `scripts/build_dataset.py` downloads
+  them.
+- **Labels:** Loghub parses every line into a template (e.g. `Failed password for <*> from <*> port <*> ssh2`).
+  - I went through the templates of each system and marked the ones that describe a problem, with a
+    category and severity. The decisions are listed one per template in
+    [`src/logreport/labels.py`](src/logreport/labels.py).
+  - BGL comes with expert anomaly labels, and those are used as they are. Thunderbird's sample is
+    expert-labelled all normal.
+  - A window's report is then built from its lines' labels. No LLM is involved in labelling, so the reference
+    answers don't favour any model.
+  - One catch: in BGL and Thunderbird the raw lines start with the expert label itself, so it is stripped
+    from the input.
+- **Split:**
+  - train: 8 systems (Linux, HDFS, Hadoop, Spark, BGL, Windows, Thunderbird, Proxifier), windows from the
+    first 80% of each file. That's 674 windows, half of them incidents after downsampling the normal ones.
+  - test, seen systems: 48 windows from the last 20% of the same 8 files.
+  - test, **unseen systems**: 120 windows from OpenSSH, Apache, Zookeeper and OpenStack, which never appear
+    in training.
+
+The unseen systems are mostly incidents. Nearly every 15-line OpenSSH window has a failed login, for
+example, so status alone is easy there. Category, component and evidence are the harder parts.
+
+## Results
+
+`python scripts/score.py` scores every file in `predictions/`.
+- **component:** counts if it names the same program (`sshd` matches `sshd(pam_unix)`).
+- **invented component:** it named something that doesn't appear anywhere in the log.
+
+| model | test set | status | category | severity | component | evidence F1 | invented component |
+|---|---|---|---|---|---|---|---|
+| keyword rules (v1-style) | seen systems | 100% | 85% | 81% | 0% | 84% | 0% |
+| keyword rules (v1-style) | **unseen systems** | 48% | 33% | 39% | 0% | 35% | 0% |
+| v1 LSTM, retrained in PyTorch | seen systems | 98% | 96% | 98% | 88% | 80% | 0% |
+| v1 LSTM, retrained in PyTorch | **unseen systems** | 78% | 77% | 66% | 34% | 51% | 50% |
+| Qwen2.5-1.5B, no fine-tuning | | _run the notebook_ | | | | | |
+| Qwen2.5-1.5B + QLoRA | | _run the notebook_ | | | | | |
+| gpt-oss-120b, prompted | | _run `predict_llm.py`_ | | | | | |
+
+What the baselines show:
+- **Keyword rules** are fine on the systems their keywords were written for, and fall apart on new ones (85%
+  → 33% category). They never identify the component. The keywords are v1's plus ones taken from the
+  training systems only; nothing was added after looking at the unseen systems.
+- **The v1 LSTM** is nearly perfect on familiar systems and noticeably worse on new ones. It invents the
+  component in half of the unseen-system windows: it can only output program names it saw in training, so
+  on OpenSSH it writes `sshd(pam_unix)` from the Linux logs. This is v1's "makes up details" problem again,
+  now measured.
+
+## Running it
+
 ```bash
-pip install tensorflow numpy
+python -m venv .venv && source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e ".[train,llm,dev]"
+
+python scripts/build_dataset.py      # data/train.jsonl, data/test.jsonl
+python scripts/predict_rules.py      # keyword baseline
+python scripts/train_lstm.py         # v1-style LSTM baseline (CPU, about 4 minutes)
+python scripts/predict_llm.py --model openai/gpt-oss-120b   # prompted baseline (GROQ_API_KEY in .env)
+python scripts/score.py
+```
+
+Fine-tuning needs an NVIDIA GPU. Open [`notebooks/finetune_colab.ipynb`](notebooks/finetune_colab.ipynb) in
+Google Colab with a free T4 and run all cells (about an hour). It:
+1. predicts with the untuned model
+2. fine-tunes with QLoRA (4-bit base model, LoRA rank 16 on all attention and MLP projections, 2 epochs)
+3. predicts with the tuned model
+4. downloads the predictions and adapter
+
+`scripts/finetune.py` also runs on a CPU as a smoke test with a smaller model:
+
+```bash
+python scripts/finetune.py --base Qwen/Qwen2.5-0.5B-Instruct --max-steps 2 --limit 4
+```
+
+## Layout
+
+```
+src/logreport/
+  loghub.py     download + load the Loghub samples
+  labels.py     per-template problem labels, component extraction
+  report.py     report format, reference reports, parsing model output
+  dataset.py    windows, train/test split, balancing
+  prompt.py     the prompt every model gets
+  rules.py      keyword baseline
+  lstm.py       v1's architecture in PyTorch
+  metrics.py    scoring
+scripts/        build data, run each approach, score
+notebooks/      Colab notebook for QLoRA fine-tuning
+v1/             the original project, unchanged
+tests/
+```
+
+## Limitations
+
+- The labels come from one person's reading of the templates. Another person would draw some lines
+  differently, for example whether a Hadoop "Address change detected" warning is an incident.
+- Loghub's samples are only 2,000 lines per system, so the test set is small (168 windows), and a few systems
+  have very few incidents.
+- The windows are fixed 15-line chunks. Real incidents don't respect those boundaries.
+- The summary field isn't scored.
