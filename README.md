@@ -95,9 +95,34 @@ example, so status alone is easy there. Category, component and evidence are the
 | keyword rules (v1-style) | **unseen systems** | 48% | 33% | 39% | 0% | 35% | 0% |
 | v1 LSTM, retrained in PyTorch | seen systems | 98% | 96% | 98% | 88% | 80% | 0% |
 | v1 LSTM, retrained in PyTorch | **unseen systems** | 78% | 77% | 66% | 34% | 51% | 50% |
-| Qwen2.5-1.5B, no fine-tuning | | _run the notebook_ | | | | | |
-| Qwen2.5-1.5B + QLoRA | | _run the notebook_ | | | | | |
-| gpt-oss-120b, prompted | | _run `predict_llm.py`_ | | | | | |
+| Qwen2.5-1.5B, no fine-tuning | seen systems | 38% | 33% | 21% | 31% | 15% | 2% |
+| Qwen2.5-1.5B, no fine-tuning | **unseen systems** | 72% | 61% | 13% | 69% | 51% | 14% |
+| **Qwen2.5-1.5B + QLoRA** | seen systems | 98% | 98% | 98% | 94% | 95% | 0% |
+| **Qwen2.5-1.5B + QLoRA** | **unseen systems** | **95%** | **92%** | 57% | **80%** | **82%** | **0%** |
+| gpt-oss-120b, prompted | | _running_ | | | | | |
+
+Valid JSON: 100% for rules and the LSTM (they can't produce anything else), 92% for the untuned Qwen, and
+97% for the tuned one.
+
+Fine-tuning: 674 examples, 2 epochs, 170 steps, 58 minutes on a free Colab T4. 18.5M trainable parameters
+(LoRA), about 2% of the model. Training loss went from 0.65 to 0.004. Details are in
+`outputs/qwen2.5-1.5b-instruct-qlora/train_info.json`, which the notebook writes.
+
+What the fine-tuned model shows:
+- **It generalises to new systems.** On the 4 systems it never saw, category accuracy is 92%, against 77% for
+  the LSTM and 33% for rules. Evidence F1 is 82% against 51%.
+- **It never invents a component.** It copies the component from the log every time, where the LSTM invents
+  one in half the unseen windows. That was the main problem with v1.
+- **Fine-tuning mostly teaches the format and the labelling conventions.** The untuned model already does
+  reasonably on unseen systems (61% category), but it uses its own ideas of severity and sometimes writes
+  invalid JSON.
+- **Severity on unseen systems is the weak spot (57%).** Nearly all of it is Apache: all 29 incidents there
+  are labelled `high` (I marked mod_jk worker failures as high), and the model says `medium` every time.
+  On the same windows it gets the component right every time and the category 90% of the time. Severity depends on labelling conventions more
+  than any other field, so it transfers the least.
+- **Its 5 invalid outputs are all Zookeeper.** It wrote a severity that isn't allowed (`warn`, copied from
+  the log level) or escaped quotes wrongly in the summary. Constrained decoding (only allowing valid JSON)
+  would fix both.
 
 What the baselines show:
 - **Keyword rules** are fine on the systems their keywords were written for, and fall apart on new ones (85%
