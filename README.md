@@ -105,7 +105,7 @@ Valid JSON: 100% for rules and the LSTM (they can't produce anything else), 92% 
 97% for the tuned one.
 
 Fine-tuning: 674 examples, 2 epochs, 170 steps, 58 minutes on a free Colab T4. 18.5M trainable parameters
-(LoRA), about 2% of the model. Training loss went from 0.65 to 0.004. Details are in
+(LoRA), about 1.2% of the model's 1.5B. Training loss went from 0.65 to 0.004. Details are in
 `outputs/qwen2.5-1.5b-instruct-qlora/train_info.json`, which the notebook writes.
 
 What the fine-tuned model shows:
